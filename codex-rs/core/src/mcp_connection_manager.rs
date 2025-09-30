@@ -19,6 +19,10 @@ use codex_mcp_client::McpClient;
 use codex_rmcp_client::RmcpClient;
 use mcp_types::ClientCapabilities;
 use mcp_types::Implementation;
+use mcp_types::ListResourcesRequestParams;
+use mcp_types::ListResourcesResult;
+use mcp_types::ReadResourceResult;
+use mcp_types::ReadResourceResultContents;
 use mcp_types::Tool;
 
 use serde_json::json;
@@ -87,6 +91,11 @@ struct ToolInfo {
     tool: Tool,
 }
 
+struct ResourceInfo {
+    server_name: String,
+    resource: mcp_types::Resource,
+}
+
 struct ManagedClient {
     client: McpClientAdapter,
     startup_timeout: Duration,
@@ -144,6 +153,17 @@ impl McpClientAdapter {
         }
     }
 
+    async fn list_resources(
+        &self,
+        params: Option<ListResourcesRequestParams>,
+        timeout: Option<Duration>,
+    ) -> Result<ListResourcesResult> {
+        match self {
+            McpClientAdapter::Legacy(client) => client.list_resources(params, timeout).await,
+            McpClientAdapter::Rmcp(client) => client.list_resources(params, timeout).await,
+        }
+    }
+
     async fn call_tool(
         &self,
         name: String,
@@ -153,6 +173,17 @@ impl McpClientAdapter {
         match self {
             McpClientAdapter::Legacy(client) => client.call_tool(name, arguments, timeout).await,
             McpClientAdapter::Rmcp(client) => client.call_tool(name, arguments, timeout).await,
+        }
+    }
+
+    async fn read_resource(
+        &self,
+        uri: String,
+        timeout: Option<Duration>,
+    ) -> Result<ReadResourceResult> {
+        match self {
+            McpClientAdapter::Legacy(client) => client.read_resource(uri, timeout).await,
+            McpClientAdapter::Rmcp(client) => client.read_resource(uri, timeout).await,
         }
     }
 }
@@ -168,6 +199,9 @@ pub(crate) struct McpConnectionManager {
 
     /// Fully qualified tool name -> tool instance.
     tools: HashMap<String, ToolInfo>,
+
+    /// Resource URI -> resource info.
+    resources: HashMap<String, ResourceInfo>,
 }
 
 impl McpConnectionManager {
@@ -310,7 +344,35 @@ impl McpConnectionManager {
 
         let tools = qualify_tools(all_tools);
 
-        Ok((Self { clients, tools }, errors))
+        let all_resources = match list_all_resources(&clients).await {
+            Ok(resources) => resources,
+            Err(e) => {
+                warn!("Failed to list resources from some MCP servers: {e:#}");
+                Vec::new()
+            }
+        };
+
+        let mut resources = HashMap::with_capacity(all_resources.len());
+        for resource_info in all_resources {
+            let uri = resource_info.resource.uri.clone();
+            if resources.contains_key(&uri) {
+                warn!(
+                    "duplicate resource URI `{}` discovered when aggregating MCP resources",
+                    uri
+                );
+                continue;
+            }
+            resources.insert(uri, resource_info);
+        }
+
+        Ok((
+            Self {
+                clients,
+                tools,
+                resources,
+            },
+            errors,
+        ))
     }
 
     /// Returns a single map that contains **all** tools. Each key is the
@@ -340,6 +402,49 @@ impl McpConnectionManager {
             .call_tool(tool.to_string(), arguments, timeout)
             .await
             .with_context(|| format!("tool call failed for `{server}/{tool}`"))
+    }
+
+    #[allow(dead_code)]
+    pub fn list_resources(&self) -> Vec<mcp_types::Resource> {
+        self.resources
+            .values()
+            .map(|info| info.resource.clone())
+            .collect()
+    }
+
+    pub async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult> {
+        let info = self
+            .resources
+            .get(uri)
+            .ok_or_else(|| anyhow!("unknown MCP resource '{uri}'"))?;
+        let managed = self
+            .clients
+            .get(&info.server_name)
+            .ok_or_else(|| anyhow!("no MCP client for server `{}`", info.server_name))?;
+
+        managed
+            .client
+            .read_resource(uri.to_string(), managed.tool_timeout)
+            .await
+            .with_context(|| {
+                format!(
+                    "resource read failed for `{}` via server `{}`",
+                    uri, info.server_name
+                )
+            })
+    }
+
+    pub async fn read_resource_text(&self, uri: &str) -> Result<Option<String>> {
+        let result = self.read_resource(uri).await?;
+        for content in result.contents {
+            match content {
+                ReadResourceResultContents::TextResourceContents(text_content) => {
+                    return Ok(Some(text_content.text));
+                }
+                ReadResourceResultContents::BlobResourceContents(_) => continue,
+            }
+        }
+        Ok(None)
     }
 
     pub fn parse_tool_name(&self, tool_name: &str) -> Option<(String, String)> {
@@ -396,6 +501,57 @@ async fn list_all_tools(clients: &HashMap<String, ManagedClient>) -> Result<Vec<
 
     info!(
         "aggregated {} tools from {} servers",
+        aggregated.len(),
+        clients.len()
+    );
+
+    Ok(aggregated)
+}
+
+async fn list_all_resources(clients: &HashMap<String, ManagedClient>) -> Result<Vec<ResourceInfo>> {
+    let mut join_set = JoinSet::new();
+
+    for (server_name, managed_client) in clients {
+        let server_name_cloned = server_name.clone();
+        let client_clone = managed_client.client.clone();
+        let startup_timeout = managed_client.startup_timeout;
+        join_set.spawn(async move {
+            let res = client_clone
+                .list_resources(None, Some(startup_timeout))
+                .await;
+            (server_name_cloned, res)
+        });
+    }
+
+    let mut aggregated: Vec<ResourceInfo> = Vec::with_capacity(join_set.len());
+
+    while let Some(join_res) = join_set.join_next().await {
+        let (server_name, list_result) = match join_res {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("Task panic when listing resources for MCP server: {e:#}");
+                continue;
+            }
+        };
+
+        let list_result = match list_result {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("Failed to list resources for MCP server '{server_name}': {e:#}");
+                continue;
+            }
+        };
+
+        for resource in list_result.resources {
+            aggregated.push(ResourceInfo {
+                server_name: server_name.clone(),
+                resource,
+            });
+        }
+    }
+
+    info!(
+        "aggregated {} resources from {} servers",
         aggregated.len(),
         clients.len()
     );

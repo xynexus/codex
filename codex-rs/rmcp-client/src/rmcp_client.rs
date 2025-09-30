@@ -12,8 +12,12 @@ use mcp_types::CallToolRequestParams;
 use mcp_types::CallToolResult;
 use mcp_types::InitializeRequestParams;
 use mcp_types::InitializeResult;
+use mcp_types::ListResourcesRequestParams;
+use mcp_types::ListResourcesResult;
 use mcp_types::ListToolsRequestParams;
 use mcp_types::ListToolsResult;
+use mcp_types::ReadResourceRequestParams;
+use mcp_types::ReadResourceResult;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::InitializeRequestParam;
 use rmcp::model::PaginatedRequestParam;
@@ -186,6 +190,34 @@ impl RmcpClient {
 
         let fut = service.list_tools(rmcp_params);
         let result = run_with_timeout(fut, timeout, "tools/list").await?;
+        convert_to_mcp(result)
+    }
+
+    pub async fn list_resources(
+        &self,
+        params: Option<ListResourcesRequestParams>,
+        timeout: Option<Duration>,
+    ) -> Result<ListResourcesResult> {
+        let service = self.service().await?;
+        let rmcp_params = params
+            .map(convert_to_rmcp::<_, PaginatedRequestParam>)
+            .transpose()?;
+
+        let fut = service.list_resources(rmcp_params);
+        let result = run_with_timeout(fut, timeout, "resources/list").await?;
+        convert_to_mcp(result)
+    }
+
+    pub async fn read_resource(
+        &self,
+        uri: String,
+        timeout: Option<Duration>,
+    ) -> Result<ReadResourceResult> {
+        let service = self.service().await?;
+        let params = ReadResourceRequestParams { uri };
+        let rmcp_params = convert_to_rmcp(params)?;
+        let fut = service.read_resource(rmcp_params);
+        let result = run_with_timeout(fut, timeout, "resources/read").await?;
         convert_to_mcp(result)
     }
 

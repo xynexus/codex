@@ -50,6 +50,8 @@ use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::config::AlwaysIncludePrompt;
+use crate::config::AlwaysIncludePromptContent;
 use crate::config::Config;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
@@ -287,6 +289,7 @@ pub(crate) struct TurnContext {
     pub(crate) tools_config: ToolsConfig,
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) always_include_prompts: Arc<[AlwaysIncludePrompt]>,
 }
 
 impl TurnContext {
@@ -479,6 +482,7 @@ impl Session {
             cwd,
             is_review_mode: false,
             final_output_json_schema: None,
+            always_include_prompts: Arc::from(config.always_include_prompts.clone()),
         };
         let services = SessionServices {
             mcp_connection_manager,
@@ -741,6 +745,53 @@ impl Session {
             Some(self.user_shell().clone()),
         )));
         items
+    }
+
+    async fn resolve_always_include_prompts(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Vec<ResponseItem> {
+        let mut items = Vec::new();
+        for prompt in turn_context.always_include_prompts.iter() {
+            match &prompt.content {
+                AlwaysIncludePromptContent::Text(text) => {
+                    items.push(Self::make_prompt_message(text.clone()))
+                }
+                AlwaysIncludePromptContent::Resource { uri } => {
+                    match self
+                        .services
+                        .mcp_connection_manager
+                        .read_resource_text(uri)
+                        .await
+                    {
+                        Ok(Some(text)) => items.push(Self::make_prompt_message(text)),
+                        Ok(None) => warn!(
+                            "MCP resource `{uri}` produced no textual content for always-include prompt"
+                        ),
+                        Err(e) => warn!(
+                            "failed to read MCP resource `{uri}` for always-include prompt: {e:#}"
+                        ),
+                    }
+                }
+                AlwaysIncludePromptContent::Tool {
+                    fully_qualified_name,
+                } => {
+                    warn!(
+                        "always-include prompts referencing tools (`{}`) are not yet supported",
+                        fully_qualified_name
+                    );
+                }
+            }
+        }
+        items
+    }
+
+    fn make_prompt_message(text: String) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text }],
+        }
     }
 
     async fn persist_rollout_items(&self, items: &[RolloutItem]) {
@@ -1192,6 +1243,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
+                    always_include_prompts: Arc::clone(&prev.always_include_prompts),
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1292,6 +1344,7 @@ async fn submission_loop(
                         cwd,
                         is_review_mode: false,
                         final_output_json_schema,
+                        always_include_prompts: Arc::clone(&turn_context.always_include_prompts),
                     };
 
                     // if the environment context has changed, record it in the conversation history
@@ -1551,6 +1604,7 @@ async fn spawn_review_thread(
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
+        always_include_prompts: Arc::clone(&parent_turn_context.always_include_prompts),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -1902,13 +1956,16 @@ async fn run_turn(
     sub_id: String,
     input: Vec<ResponseItem>,
 ) -> CodexResult<TurnRunResult> {
+    let mut prompt_input = sess.resolve_always_include_prompts(turn_context).await;
+    prompt_input.extend(input);
+
     let tools = get_openai_tools(
         &turn_context.tools_config,
         Some(sess.services.mcp_connection_manager.list_all_tools()),
     );
 
     let prompt = Prompt {
-        input,
+        input: prompt_input,
         tools,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
@@ -3592,6 +3649,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            always_include_prompts: Arc::from(config.always_include_prompts.clone()),
         };
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -3661,6 +3719,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            always_include_prompts: Arc::from(config.always_include_prompts.clone()),
         });
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),

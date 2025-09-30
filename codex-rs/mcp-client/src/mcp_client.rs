@@ -31,11 +31,17 @@ use mcp_types::JSONRPCMessage;
 use mcp_types::JSONRPCNotification;
 use mcp_types::JSONRPCRequest;
 use mcp_types::JSONRPCResponse;
+use mcp_types::ListResourcesRequest;
+use mcp_types::ListResourcesRequestParams;
+use mcp_types::ListResourcesResult;
 use mcp_types::ListToolsRequest;
 use mcp_types::ListToolsRequestParams;
 use mcp_types::ListToolsResult;
 use mcp_types::ModelContextProtocolNotification;
 use mcp_types::ModelContextProtocolRequest;
+use mcp_types::ReadResourceRequest;
+use mcp_types::ReadResourceRequestParams;
+use mcp_types::ReadResourceResult;
 use mcp_types::RequestId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -332,6 +338,27 @@ impl McpClient {
         timeout: Option<Duration>,
     ) -> Result<ListToolsResult> {
         self.send_request::<ListToolsRequest>(params, timeout).await
+    }
+
+    /// Convenience wrapper around `resources/list`.
+    pub async fn list_resources(
+        &self,
+        params: Option<ListResourcesRequestParams>,
+        timeout: Option<Duration>,
+    ) -> Result<ListResourcesResult> {
+        self.send_request::<ListResourcesRequest>(params, timeout)
+            .await
+    }
+
+    /// Convenience wrapper around `resources/read`.
+    pub async fn read_resource(
+        &self,
+        uri: String,
+        timeout: Option<Duration>,
+    ) -> Result<ReadResourceResult> {
+        let params = ReadResourceRequestParams { uri };
+        self.send_request::<ReadResourceRequest>(params, timeout)
+            .await
     }
 
     /// Convenience wrapper around `tools/call`.

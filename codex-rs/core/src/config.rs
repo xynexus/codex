@@ -33,6 +33,7 @@ use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -52,6 +53,136 @@ pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
+
+/// Runtime representation of an always-include prompt configured by the user.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlwaysIncludePrompt {
+    pub name: Option<String>,
+    pub content: AlwaysIncludePromptContent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlwaysIncludePromptContent {
+    Text(String),
+    Resource { uri: String },
+    Tool { fully_qualified_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlwaysIncludePromptToml {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AlwaysIncludePromptsToml(Vec<AlwaysIncludePromptToml>);
+
+impl AlwaysIncludePromptsToml {
+    fn into_vec(self) -> Vec<AlwaysIncludePromptToml> {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AlwaysIncludePromptsToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            List(Vec<AlwaysIncludePromptToml>),
+            Map(HashMap<String, AlwaysIncludePromptToml>),
+        }
+
+        let helper = Option::<Helper>::deserialize(deserializer)?;
+        let prompts = match helper {
+            None => Vec::new(),
+            Some(Helper::List(entries)) => entries,
+            Some(Helper::Map(map)) => {
+                let mut entries: Vec<AlwaysIncludePromptToml> = map
+                    .into_iter()
+                    .map(|(key, mut prompt)| {
+                        if prompt.name.is_none() {
+                            prompt.name = Some(key);
+                        }
+                        prompt
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.name.as_deref().cmp(&b.name.as_deref()));
+                entries
+            }
+        };
+
+        Ok(Self(prompts))
+    }
+}
+
+impl AlwaysIncludePromptToml {
+    fn into_runtime(self) -> io::Result<AlwaysIncludePrompt> {
+        let mut specified = 0;
+        if self.text.is_some() {
+            specified += 1;
+        }
+        if self.resource.is_some() {
+            specified += 1;
+        }
+        if self.tool.is_some() {
+            specified += 1;
+        }
+
+        if specified == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "alwaysIncludePrompts entries must specify `text`, `resource`, or `tool`",
+            ));
+        }
+
+        if specified > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "alwaysIncludePrompts entries must not specify more than one of `text`, `resource`, or `tool`",
+            ));
+        }
+
+        let content = if let Some(text) = self.text {
+            AlwaysIncludePromptContent::Text(text)
+        } else if let Some(uri) = self.resource {
+            if uri.trim().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "alwaysIncludePrompts resource URI must not be empty",
+                ));
+            }
+            AlwaysIncludePromptContent::Resource { uri }
+        } else if let Some(tool) = self.tool {
+            if tool.trim().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "alwaysIncludePrompts tool name must not be empty",
+                ));
+            }
+            AlwaysIncludePromptContent::Tool {
+                fully_qualified_name: tool,
+            }
+        } else {
+            // Specified count guarantees this branch is unreachable.
+            unreachable!()
+        };
+
+        Ok(AlwaysIncludePrompt {
+            name: self.name,
+            content,
+        })
+    }
+}
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +265,9 @@ pub struct Config {
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
+
+    /// Prompts that should be injected into every turn before sending the request to the model.
+    pub always_include_prompts: Vec<AlwaysIncludePrompt>,
 
     /// Combined provider map (defaults merged with user-defined overrides).
     pub model_providers: HashMap<String, ModelProviderInfo>,
@@ -663,6 +797,9 @@ pub struct ConfigToml {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
+    #[serde(default)]
+    pub always_include_prompts: AlwaysIncludePromptsToml,
+
     /// User-defined provider entries that extend/override the built-in list.
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderInfo>,
@@ -917,6 +1054,14 @@ impl Config {
             None => ConfigProfile::default(),
         };
 
+        let always_include_prompts: Vec<AlwaysIncludePrompt> = cfg
+            .always_include_prompts
+            .clone()
+            .into_vec()
+            .into_iter()
+            .map(AlwaysIncludePromptToml::into_runtime)
+            .collect::<io::Result<Vec<_>>>()?;
+
         let sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode);
 
         let mut model_providers = built_in_model_providers();
@@ -1036,6 +1181,7 @@ impl Config {
             user_instructions,
             base_instructions,
             mcp_servers: cfg.mcp_servers,
+            always_include_prompts,
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
             codex_home,
@@ -1809,6 +1955,7 @@ model_verbosity = "high"
                 notify: None,
                 cwd: fixture.cwd(),
                 mcp_servers: HashMap::new(),
+                always_include_prompts: Vec::new(),
                 model_providers: fixture.model_provider_map.clone(),
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
                 codex_home: fixture.codex_home(),
@@ -1869,6 +2016,7 @@ model_verbosity = "high"
             notify: None,
             cwd: fixture.cwd(),
             mcp_servers: HashMap::new(),
+            always_include_prompts: Vec::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             codex_home: fixture.codex_home(),
@@ -1944,6 +2092,7 @@ model_verbosity = "high"
             notify: None,
             cwd: fixture.cwd(),
             mcp_servers: HashMap::new(),
+            always_include_prompts: Vec::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             codex_home: fixture.codex_home(),
@@ -2005,6 +2154,7 @@ model_verbosity = "high"
             notify: None,
             cwd: fixture.cwd(),
             mcp_servers: HashMap::new(),
+            always_include_prompts: Vec::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             codex_home: fixture.codex_home(),
