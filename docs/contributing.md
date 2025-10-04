@@ -14,6 +14,10 @@ If you want to add a new feature or change the behavior of an existing one, plea
 - Keep your changes focused. Multiple unrelated fixes should be opened as separate PRs.
 - Following the [development setup](#development-workflow) instructions above, ensure your change is free of lint warnings and test failures.
 
+### Repository SSH key
+
+Maintainers must use the SSH key at `~/.ssh/sadara@xynexus.ed25519` when pushing to `github.com:xynexus/codex.git`.
+
 ### Writing high-impact code changes
 
 1. **Start with an issue.** Open a new one or comment on an existing discussion so we can agree on the solution before code is written.
