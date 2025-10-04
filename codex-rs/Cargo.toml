@@ -1,9 +1,14 @@
 [workspace]
 members = [
+    "backend-client",
     "ansi-escape",
     "app-server",
+    "app-server-protocol",
     "apply-patch",
     "arg0",
+    "codex-backend-openapi-models",
+    "cloud-tasks",
+    "cloud-tasks-client",
     "cli",
     "common",
     "core",
@@ -24,8 +29,10 @@ members = [
     "responses-api-proxy",
     "otel",
     "tui",
+    "git-apply",
     "utils/json-to-toml",
     "utils/readiness",
+    "utils/string",
 ]
 resolver = "2"
 
@@ -42,6 +49,7 @@ edition = "2024"
 app_test_support = { path = "app-server/tests/common" }
 codex-ansi-escape = { path = "ansi-escape" }
 codex-app-server = { path = "app-server" }
+codex-app-server-protocol = { path = "app-server-protocol" }
 codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
 codex-chatgpt = { path = "chatgpt" }
@@ -59,10 +67,12 @@ codex-otel = { path = "otel" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
 codex-protocol-ts = { path = "protocol-ts" }
+codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-tui = { path = "tui" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-readiness = { path = "utils/readiness" }
+codex-utils-string = { path = "utils/string" }
 core_test_support = { path = "core/tests/common" }
 mcp-types = { path = "mcp-types" }
 mcp_test_support = { path = "mcp-server/tests/common" }
@@ -89,6 +99,7 @@ derive_more = "2"
 diffy = "0.4.2"
 dirs = "6"
 dotenvy = "0.15.7"
+dunce = "1.0.4"
 env-flags = "0.1.1"
 env_logger = "0.11.5"
 escargot = "0.5"
@@ -117,6 +128,7 @@ opentelemetry-semantic-conventions = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 os_info = "3.12.0"
 owo-colors = "4.2.0"
+paste = "1.0.15"
 path-absolutize = "3.1.1"
 path-clean = "1.0.1"
 pathdiff = "0.2"
